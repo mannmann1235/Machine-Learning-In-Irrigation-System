@@ -1,0 +1,306 @@
+library(shiny)
+library(jsonlite)
+library(readr)
+library(dplyr)
+
+# Required column definitions
+REQUIRED_ZONE_COLS <- c("zone_id", "name", "precip_rate_in_hr", "flow_expected_lpm", "priority", "active")
+REQUIRED_ZT_COLS   <- c("zone_id", "crop_type", "growth_stage", "kc_now", "root_depth_m", "awc_mm_per_m", "mad_frac", "efficiency", "du_lq")
+REQUIRED_FC_COLS   <- c("day", "et0_mm", "rain_mm", "tmax_c", "tmin_c", "wind_mps", "rh_pct")
+
+# Conversion functions
+mmhr_from_inhr <- function(x) as.numeric(x) * 25.4
+lpm_from_gpm   <- function(x) as.numeric(x) * 3.78541
+
+# Check columns helper with error handling
+check_cols <- function(df, required, name) {
+  if (is.null(df) || nrow(df) == 0) {
+    stop(paste(name, "is empty or could not be loaded"))
+  }
+  missing <- setdiff(required, colnames(df))
+  if (length(missing) > 0) {
+    stop(paste(name, "missing columns:", paste(missing, collapse = ", ")))
+  }
+  return(df)
+}
+
+# Safe CSV loading from uploaded file
+safe_load_uploaded_csv <- function(file_input, required_cols, name) {
+  tryCatch({
+    if (is.null(file_input)) {
+      stop(paste("No file uploaded for", name))
+    }
+    df <- read_csv(file_input$datapath, show_col_types = FALSE)
+    check_cols(df, required_cols, name)
+    return(df)
+  }, error = function(e) {
+    stop(paste("Error processing", name, ":", e$message))
+  })
+}
+
+# Safe JSON loading from uploaded file
+safe_load_uploaded_json <- function(file_input, name) {
+  tryCatch({
+    if (is.null(file_input)) {
+      stop(paste("No file uploaded for", name))
+    }
+    fromJSON(file_input$datapath)
+  }, error = function(e) {
+    stop(paste("Error processing", name, ":", e$message))
+  })
+}
+
+ui <- fluidPage(
+  titlePanel("Irrigation Trial Inputs Loader & Checker"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      h4("Upload Your Files:"),
+      
+      fileInput("site_file", "site.json", 
+                accept = c(".json"), multiple = FALSE),
+      
+      fileInput("zones_file", "zones.csv", 
+                accept = c(".csv"), multiple = FALSE),
+      
+      fileInput("targets_file", "zone_targets.csv", 
+                accept = c(".csv"), multiple = FALSE),
+      
+      fileInput("forecast_file", "forecast_daily.csv", 
+                accept = c(".csv"), multiple = FALSE),
+      
+      fileInput("state_file", "state.json (optional)", 
+                accept = c(".json"), multiple = FALSE),
+      
+      hr(),
+      actionButton("loadBtn", "Process Uploaded Files", class = "btn-primary"),
+      
+      hr(),
+      h5("Required Files:"),
+      tags$ul(
+        tags$li("site.json"),
+        tags$li("zones.csv"),
+        tags$li("zone_targets.csv"),
+        tags$li("forecast_daily.csv"),
+        tags$li("state.json (optional)")
+      )
+    ),
+    
+    mainPanel(
+      conditionalPanel(
+        condition = "input.loadBtn == 0",
+        div(
+          h3("Welcome"),
+          p("Upload your irrigation trial data files using the file inputs on the left, then click 'Process Uploaded Files'."),
+          br(),
+          div(
+            h4("Upload Status:"),
+            verbatimTextOutput("upload_status")
+          ),
+          class = "text-center"
+        )
+      ),
+      
+      verbatimTextOutput("log"),
+      
+      conditionalPanel(
+        condition = "output.hasError == false && input.loadBtn > 0",
+        hr(),
+        h4("Summary Statistics"),
+        tableOutput("summary")
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  # Reactive values to store loaded data
+  values <- reactiveValues(
+    logs = "",
+    hasError = FALSE,
+    site = NULL,
+    zones = NULL,
+    zone_targets = NULL,
+    forecast = NULL,
+    state = NULL
+  )
+  
+  # Show upload status
+  output$upload_status <- renderText({
+    status <- c()
+    
+    if (!is.null(input$site_file)) {
+      status <- c(status, paste("✓ site.json:", input$site_file$name))
+    } else {
+      status <- c(status, "○ site.json: Not uploaded")
+    }
+    
+    if (!is.null(input$zones_file)) {
+      status <- c(status, paste("✓ zones.csv:", input$zones_file$name))
+    } else {
+      status <- c(status, "○ zones.csv: Not uploaded")
+    }
+    
+    if (!is.null(input$targets_file)) {
+      status <- c(status, paste("✓ zone_targets.csv:", input$targets_file$name))
+    } else {
+      status <- c(status, "○ zone_targets.csv: Not uploaded")
+    }
+    
+    if (!is.null(input$forecast_file)) {
+      status <- c(status, paste("✓ forecast_daily.csv:", input$forecast_file$name))
+    } else {
+      status <- c(status, "○ forecast_daily.csv: Not uploaded")
+    }
+    
+    if (!is.null(input$state_file)) {
+      status <- c(status, paste("✓ state.json:", input$state_file$name, "(optional)"))
+    } else {
+      status <- c(status, "○ state.json: Not uploaded (optional)")
+    }
+    
+    paste(status, collapse = "\n")
+  })
+  
+  # Load data when button is clicked
+  observeEvent(input$loadBtn, {
+    values$hasError <- FALSE
+    
+    tryCatch({
+      logs <- c("[INFO] Processing uploaded files...")
+      
+      # Check required files are uploaded
+      if (is.null(input$site_file)) {
+        stop("Please upload site.json file")
+      }
+      if (is.null(input$zones_file)) {
+        stop("Please upload zones.csv file")
+      }
+      if (is.null(input$targets_file)) {
+        stop("Please upload zone_targets.csv file")
+      }
+      if (is.null(input$forecast_file)) {
+        stop("Please upload forecast_daily.csv file")
+      }
+      
+      # Load site.json
+      values$site <- fromJSON(input$site_file$datapath)
+      logs <- c(logs, sprintf("[OK] site.json processed: name=%s, tz=%s, design_gpm=%s", 
+                             values$site$name %||% "unknown",
+                             values$site$timezone %||% "unknown", 
+                             values$site$design_gpm %||% "unknown"))
+      
+      # Load zones.csv
+      values$zones <- read_csv(input$zones_file$datapath, show_col_types = FALSE)
+      values$zones <- check_cols(values$zones, REQUIRED_ZONE_COLS, "zones.csv")
+      logs <- c(logs, sprintf("[OK] zones.csv processed: %d zones", nrow(values$zones)))
+      
+      # Load zone_targets.csv
+      values$zone_targets <- read_csv(input$targets_file$datapath, show_col_types = FALSE)
+      values$zone_targets <- check_cols(values$zone_targets, REQUIRED_ZT_COLS, "zone_targets.csv")
+      logs <- c(logs, sprintf("[OK] zone_targets.csv processed: %d rows", nrow(values$zone_targets)))
+      
+      # Load forecast_daily.csv
+      values$forecast <- read_csv(input$forecast_file$datapath, show_col_types = FALSE)
+      values$forecast <- check_cols(values$forecast, REQUIRED_FC_COLS, "forecast_daily.csv")
+      logs <- c(logs, sprintf("[OK] forecast_daily.csv processed: %d days, first day=%s", 
+                             nrow(values$forecast), values$forecast$day[1]))
+      
+      # Load optional state.json
+      if (!is.null(input$state_file)) {
+        values$state <- fromJSON(input$state_file$datapath)
+        logs <- c(logs, "[OK] state.json processed")
+      } else {
+        logs <- c(logs, "[INFO] state.json not uploaded; will use default values")
+      }
+      
+      # Validation checks
+      logs <- c(logs, "", "[VALIDATION CHECKS]")
+      
+      # Check zone IDs match between files
+      zone_ids_zones <- values$zones$zone_id
+      zone_ids_targets <- values$zone_targets$zone_id
+      missing_targets <- setdiff(zone_ids_zones, zone_ids_targets)
+      if (length(missing_targets) > 0) {
+        logs <- c(logs, paste("[WARN] Zones without targets:", paste(missing_targets, collapse = ", ")))
+      }
+      
+      # Capacity check
+      if (!is.null(values$site$design_gpm) && is.numeric(values$site$design_gpm)) {
+        design_lpm <- lpm_from_gpm(values$site$design_gpm)
+        sum_flows <- sum(as.numeric(values$zones$flow_expected_lpm), na.rm = TRUE)
+        logs <- c(logs, sprintf("[CAPACITY] Design: %.1f LPM, Total zone flows: %.1f LPM", 
+                               design_lpm, sum_flows))
+        
+        if (sum_flows > design_lpm) {
+          logs <- c(logs, "[WARN] Total zone flows exceed design capacity")
+        } else {
+          logs <- c(logs, "[OK] Total flows within design capacity")
+        }
+      }
+      
+      # Check for active zones
+      active_zones <- sum(values$zones$active == TRUE | values$zones$active == "TRUE", na.rm = TRUE)
+      logs <- c(logs, sprintf("[INFO] Active zones: %d of %d", active_zones, nrow(values$zones)))
+      
+      # Precipitation rate conversions
+      logs <- c(logs, "", "[CONVERSIONS] Precipitation rates (in/hr → mm/hr):")
+      for (i in seq_len(min(5, nrow(values$zones)))) {
+        pr_mmhr <- mmhr_from_inhr(values$zones$precip_rate_in_hr[i])
+        logs <- c(logs, sprintf("  Zone %s: %s in/hr ≈ %.1f mm/hr",
+                               values$zones$zone_id[i], 
+                               values$zones$precip_rate_in_hr[i], 
+                               pr_mmhr))
+      }
+      if (nrow(values$zones) > 5) {
+        logs <- c(logs, sprintf("  ... and %d more zones", nrow(values$zones) - 5))
+      }
+      
+      logs <- c(logs, "", "[SUCCESS] All files processed successfully!")
+      logs <- c(logs, "[READY] Data validated and ready for irrigation scheduling.")
+      
+      values$logs <- paste(logs, collapse = "\n")
+      
+    }, error = function(e) {
+      values$hasError <- TRUE
+      values$logs <- paste("[ERROR]", e$message)
+    })
+  })
+  
+  output$log <- renderText({
+    values$logs
+  })
+  
+  output$hasError <- reactive({
+    values$hasError
+  })
+  outputOptions(output, "hasError", suspendWhenHidden = FALSE)
+  
+  # Summary table
+  output$summary <- renderTable({
+    req(!values$hasError, values$zones, values$forecast)
+    
+    data.frame(
+      Metric = c(
+        "Total Zones",
+        "Active Zones", 
+        "Total Flow Rate (LPM)",
+        "Forecast Days",
+        "Avg ET0 (mm/day)",
+        "Avg Rainfall (mm/day)"
+      ),
+      Value = c(
+        nrow(values$zones),
+        sum(values$zones$active == TRUE | values$zones$active == "TRUE", na.rm = TRUE),
+        round(sum(as.numeric(values$zones$flow_expected_lpm), na.rm = TRUE), 1),
+        nrow(values$forecast),
+        round(mean(as.numeric(values$forecast$et0_mm), na.rm = TRUE), 2),
+        round(mean(as.numeric(values$forecast$rain_mm), na.rm = TRUE), 2)
+      ),
+      stringsAsFactors = FALSE
+    )
+  })
+}
+
+shinyApp(ui, server)
