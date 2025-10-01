@@ -1,0 +1,481 @@
+# ==============================================================================
+# OpenWeather Irrigation Decision Support System
+# Purpose: Fetch weather data and provide irrigation recommendations
+# API: OpenWeather One Call 3.0
+# Author: Irrigation System Team
+# Date: 2025
+# ==============================================================================
+
+# --- Required Libraries -------------------------------------------------------
+library(shiny)
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(DT)
+library(ggplot2)
+
+# --- User Interface -----------------------------------------------------------
+ui <- fluidPage(
+    
+    # Application Title
+    titlePanel(
+        div(
+            style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+               padding: 20px; 
+               border-radius: 8px; 
+               color: white; 
+               margin-bottom: 20px;",
+            h2("OpenWeather Irrigation Decision Support System", 
+               style = "margin: 0; font-weight: 600;"),
+            p("Real-time Weather Data Analysis for Optimal Irrigation Scheduling", 
+              style = "margin: 5px 0 0 0; font-size: 14px; opacity: 0.9;")
+        )
+    ),
+    
+    sidebarLayout(
+        
+        # --- Sidebar Panel: Configuration & Controls ----------------------------
+        sidebarPanel(
+            width = 3,
+            
+            # Geographic Configuration Section
+            h4("Geographic Configuration", style = "color: #2c3e50; font-weight: 600;"),
+            p("Specify target location coordinates", style = "font-size: 12px; color: #7f8c8d;"),
+            
+            numericInput(
+                inputId = "lat",
+                label = "Latitude (°):",
+                value = 36.77,
+                min = -90,
+                max = 90,
+                step = 0.01
+            ),
+            
+            numericInput(
+                inputId = "lon",
+                label = "Longitude (°):",
+                value = -119.41,
+                min = -180,
+                max = 180,
+                step = 0.01
+            ),
+            
+            hr(style = "border-top: 1px solid #ecf0f1;"),
+            
+            # Irrigation Criteria Section
+            h4("Irrigation Criteria", style = "color: #2c3e50; font-weight: 600;"),
+            p("Define threshold parameters for irrigation recommendations", 
+              style = "font-size: 12px; color: #7f8c8d;"),
+            
+            numericInput(
+                inputId = "temp_threshold",
+                label = "Minimum Temperature Threshold (°C):",
+                value = 28,
+                min = 0,
+                max = 50,
+                step = 0.5
+            ),
+            
+            checkboxInput(
+                inputId = "exclude_rain",
+                label = "Exclude precipitation periods from recommendations",
+                value = TRUE
+            ),
+            
+            hr(style = "border-top: 1px solid #ecf0f1;"),
+            
+            # Data Retrieval Control
+            actionButton(
+                inputId = "fetch_data",
+                label = "Retrieve Weather Data",
+                icon = icon("cloud-download-alt"),
+                class = "btn-primary btn-block",
+                style = "font-weight: 600; padding: 12px;"
+            ),
+            
+            br(),
+            
+            # System Status Indicator
+            uiOutput("status_box")
+        ),
+        
+        # --- Main Panel: Data Visualization & Analysis -------------------------
+        mainPanel(
+            width = 9,
+            
+            tabsetPanel(
+                type = "pills",
+                
+                # Tab 1: Irrigation Recommendations
+                tabPanel(
+                    title = "Irrigation Recommendations",
+                    icon = icon("tint"),
+                    br(),
+                    
+                    div(
+                        style = "background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px;",
+                        h4("Recommended Irrigation Time Windows", style = "margin-top: 0;"),
+                        p("The following hours meet the specified criteria for optimal irrigation scheduling.")
+                    ),
+                    
+                    DTOutput("irrigation_table"),
+                    
+                    br(),
+                    
+                    div(
+                        style = "background-color: #e3f2fd; padding: 12px; border-left: 4px solid #2196f3; border-radius: 4px;",
+                        h5(icon("info-circle"), textOutput("summary_text", inline = TRUE))
+                    )
+                ),
+                
+                # Tab 2: Temperature & Humidity Analysis
+                tabPanel(
+                    title = "Temperature & Humidity",
+                    icon = icon("thermometer-half"),
+                    br(),
+                    
+                    h4("Temperature Forecast Analysis"),
+                    p("Hourly temperature trends with irrigation threshold indicator"),
+                    plotOutput("temp_plot", height = "400px"),
+                    
+                    br(),
+                    hr(),
+                    
+                    h4("Relative Humidity Forecast"),
+                    p("Atmospheric moisture content over forecast period"),
+                    plotOutput("humidity_plot", height = "400px")
+                ),
+                
+                # Tab 3: Precipitation Forecast
+                tabPanel(
+                    title = "Precipitation Forecast",
+                    icon = icon("cloud-rain"),
+                    br(),
+                    
+                    h4("Rainfall Forecast Analysis"),
+                    p("Expected precipitation amounts per hour"),
+                    plotOutput("rain_plot", height = "500px")
+                ),
+                
+                # Tab 4: Complete Dataset
+                tabPanel(
+                    title = "Complete Dataset",
+                    icon = icon("table"),
+                    br(),
+                    
+                    div(
+                        style = "background-color: #fff3cd; padding: 12px; border-left: 4px solid #ffc107; border-radius: 4px; margin-bottom: 15px;",
+                        p(icon("exclamation-triangle"), 
+                          strong("Note:"), 
+                          "This table displays all available meteorological parameters from the API response.",
+                          style = "margin: 0;")
+                    ),
+                    
+                    DTOutput("raw_table")
+                )
+            )
+        )
+    ),
+    
+    # --- Footer ---------------------------------------------------------------
+    hr(),
+    div(
+        style = "text-align: center; color: #7f8c8d; padding: 20px; font-size: 12px;",
+        p("Data Source: OpenWeather One Call API 3.0 | All timestamps in UTC"),
+        p("© 2025 Irrigation Management System")
+    )
+)
+
+# --- Server Logic -------------------------------------------------------------
+server <- function(input, output, session) {
+    
+    # Reactive values for storing API response data
+    weather_data_rv <- reactiveVal(NULL)
+    hourly_df_rv <- reactiveVal(NULL)
+    
+    # --- Data Retrieval Handler -----------------------------------------------
+    observeEvent(input$fetch_data, {
+        
+        # Validate required inputs
+        req(input$lat, input$lon)
+        
+        # Display loading notification
+        showNotification(
+            "Initiating API request to OpenWeather service...",
+            type = "message",
+            duration = 2
+        )
+        
+        # Construct API endpoint URL
+        api_url <- paste0(
+            "https://api.openweathermap.org/data/3.0/onecall?",
+            "lat=", input$lat,
+            "&lon=", input$lon,
+            "&units=metric",
+            "&appid=110a3559c82e39cb72abc2c4db5ebc2f"
+        )
+        
+        # Execute HTTP GET request
+        tryCatch({
+            
+            response <- httr::GET(api_url)
+            
+            if (response$status_code == 200) {
+                
+                # Parse JSON response
+                json_content <- content(response, "text", encoding = "UTF-8")
+                weather_data <- fromJSON(json_content, flatten = TRUE)
+                
+                # Store complete weather data
+                weather_data_rv(weather_data)
+                
+                # Process hourly forecast data
+                if (!is.null(weather_data$hourly) && length(weather_data$hourly) > 0) {
+                    
+                    hourly_df <- as.data.frame(weather_data$hourly)
+                    
+                    # Convert Unix timestamp to POSIXct
+                    hourly_df$dt <- as.POSIXct(
+                        hourly_df$dt,
+                        origin = "1970-01-01",
+                        tz = "UTC"
+                    )
+                    
+                    # Handle missing precipitation data
+                    if (!"rain.1h" %in% names(hourly_df)) {
+                        hourly_df$rain.1h <- 0
+                    }
+                    hourly_df$rain.1h[is.na(hourly_df$rain.1h)] <- 0
+                    
+                    # Store processed hourly data
+                    hourly_df_rv(hourly_df)
+                    
+                    showNotification(
+                        "Weather data successfully retrieved and processed.",
+                        type = "message",
+                        duration = 3
+                    )
+                    
+                } else {
+                    showNotification(
+                        "API response contains no hourly forecast data.",
+                        type = "warning",
+                        duration = 5
+                    )
+                }
+                
+            } else {
+                # Handle HTTP error responses
+                showNotification(
+                    paste0(
+                        "API request failed with status code: ", response$status_code,
+                        ". Please verify API key and endpoint configuration."
+                    ),
+                    type = "error",
+                    duration = 5
+                )
+            }
+            
+        }, error = function(e) {
+            # Handle network or parsing errors
+            showNotification(
+                paste("Request error:", e$message),
+                type = "error",
+                duration = 5
+            )
+        })
+    })
+    
+    # --- System Status Display ------------------------------------------------
+    output$status_box <- renderUI({
+        
+        if (is.null(hourly_df_rv())) {
+            
+            # No data state
+            div(
+                style = "background-color: #f8f9fa; 
+                 padding: 15px; 
+                 border-radius: 5px; 
+                 border-left: 4px solid #6c757d;",
+                p(strong("System Status:"), "Awaiting data retrieval"),
+                p("Click the button above to fetch current weather data.", 
+                  style = "font-size: 12px; margin-bottom: 0;")
+            )
+            
+        } else {
+            
+            # Data loaded state
+            div(
+                style = "background-color: #d4edda; 
+                 padding: 15px; 
+                 border-radius: 5px; 
+                 border-left: 4px solid #28a745;",
+                p(icon("check-circle"), strong("Data Successfully Loaded")),
+                p(paste("Total forecast records:", nrow(hourly_df_rv())), 
+                  style = "font-size: 12px; margin-bottom: 0;")
+            )
+        }
+    })
+    
+    # --- Irrigation Recommendations Table -------------------------------------
+    output$irrigation_table <- renderDT({
+        
+        req(hourly_df_rv())
+        
+        hourly_df <- hourly_df_rv()
+        
+        # Apply filtering criteria
+        irrigation_recommendations <- hourly_df %>%
+            filter(
+                temp > input$temp_threshold,
+                if (input$exclude_rain) (rain.1h == 0) else TRUE
+            ) %>%
+            select(dt, temp, humidity, rain.1h) %>%
+            mutate(dt = format(dt, "%Y-%m-%d %H:%M UTC"))
+        
+        # Render interactive data table
+        datatable(
+            irrigation_recommendations,
+            colnames = c(
+                "Date & Time",
+                "Temperature (°C)",
+                "Relative Humidity (%)",
+                "Precipitation (mm/h)"
+            ),
+            options = list(
+                pageLength = 10,
+                dom = 'frtip',
+                language = list(
+                    emptyTable = "No hours meet the specified irrigation criteria"
+                )
+            ),
+            rownames = FALSE
+        ) %>%
+            formatRound(columns = c("temp", "humidity", "rain.1h"), digits = 1)
+    })
+    
+    # --- Summary Statistics ---------------------------------------------------
+    output$summary_text <- renderText({
+        
+        req(hourly_df_rv())
+        
+        hourly_df <- hourly_df_rv()
+        
+        irrigation_recommendations <- hourly_df %>%
+            filter(
+                temp > input$temp_threshold,
+                if (input$exclude_rain) (rain.1h == 0) else TRUE
+            )
+        
+        paste0(
+            "Analysis identified ", nrow(irrigation_recommendations),
+            " hour(s) meeting irrigation criteria within the forecast period."
+        )
+    })
+    
+    # --- Temperature Visualization --------------------------------------------
+    output$temp_plot <- renderPlot({
+        
+        req(hourly_df_rv())
+        
+        ggplot(hourly_df_rv(), aes(x = dt, y = temp)) +
+            geom_line(color = "#e74c3c", size = 1.2) +
+            geom_hline(
+                yintercept = input$temp_threshold,
+                linetype = "dashed",
+                color = "#c0392b",
+                size = 1
+            ) +
+            annotate(
+                "text",
+                x = min(hourly_df_rv()$dt),
+                y = input$temp_threshold,
+                label = paste("Threshold:", input$temp_threshold, "°C"),
+                vjust = -0.5,
+                hjust = 0,
+                color = "#c0392b",
+                size = 4
+            ) +
+            labs(
+                title = "Hourly Temperature Forecast",
+                x = "Date & Time (UTC)",
+                y = "Temperature (°C)"
+            ) +
+            theme_minimal(base_size = 12) +
+            theme(
+                plot.title = element_text(size = 16, face = "bold", hjust = 0),
+                axis.title = element_text(face = "bold")
+            )
+    })
+    
+    # --- Humidity Visualization -----------------------------------------------
+    output$humidity_plot <- renderPlot({
+        
+        req(hourly_df_rv())
+        
+        ggplot(hourly_df_rv(), aes(x = dt, y = humidity)) +
+            geom_area(fill = "#3498db", alpha = 0.3) +
+            geom_line(color = "#2980b9", size = 1.2) +
+            labs(
+                title = "Relative Humidity Forecast",
+                x = "Date & Time (UTC)",
+                y = "Relative Humidity (%)"
+            ) +
+            theme_minimal(base_size = 12) +
+            theme(
+                plot.title = element_text(size = 16, face = "bold", hjust = 0),
+                axis.title = element_text(face = "bold")
+            )
+    })
+    
+    # --- Precipitation Visualization ------------------------------------------
+    output$rain_plot <- renderPlot({
+        
+        req(hourly_df_rv())
+        
+        ggplot(hourly_df_rv(), aes(x = dt, y = rain.1h)) +
+            geom_col(fill = "#9b59b6", alpha = 0.7, width = 3000) +
+            labs(
+                title = "Hourly Precipitation Forecast",
+                x = "Date & Time (UTC)",
+                y = "Precipitation Rate (mm/hour)"
+            ) +
+            theme_minimal(base_size = 12) +
+            theme(
+                plot.title = element_text(size = 16, face = "bold", hjust = 0),
+                axis.title = element_text(face = "bold")
+            )
+    })
+    
+    # --- Complete Dataset Table -----------------------------------------------
+    output$raw_table <- renderDT({
+        
+        req(hourly_df_rv())
+        
+        hourly_df <- hourly_df_rv()
+        
+        # Format datetime for display
+        display_df <- hourly_df %>%
+            mutate(dt = format(dt, "%Y-%m-%d %H:%M UTC"))
+        
+        datatable(
+            display_df,
+            options = list(
+                pageLength = 15,
+                scrollX = TRUE,
+                columnDefs = list(
+                    list(className = 'dt-center', targets = "_all")
+                )
+            ),
+            rownames = FALSE,
+            class = 'cell-border stripe'
+        ) %>%
+            formatRound(
+                columns = which(sapply(display_df, is.numeric)),
+                digits = 2
+            )
+    })
+}
+
+# --- Application Execution ----------------------------------------------------
+shinyApp(ui = ui, server = server)
