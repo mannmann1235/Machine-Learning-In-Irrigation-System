@@ -1,0 +1,79 @@
+# Install required package if not already installed
+# install.packages("visNetwork")
+
+library(visNetwork)
+
+# Define nodes with detailed information
+nodes <- data.frame(
+    id = 1:5,
+    label = c(
+        "OpenWeather API",
+        "AWS Amplify\nDashboard",
+        "AWS IoT Core\n(MQTT)",
+        "Raspberry Pi\nController",
+        "Water Pump\nMotor"
+    ),
+    title = c(
+        "<b>OpenWeather API (OneCall 3.0)</b><br>Provides:<br>• Temperature<br>• Rainfall data<br>• Relative Humidity<br>• Weather Forecast",
+        "<b>AWS Amplify Dashboard</b><br>• Decision Logic<br>• ET Calculation<br>• Irrigation Rules<br>• User Interface",
+        "<b>AWS IoT Core</b><br>• MQTT Protocol<br>• Command Broker<br>• Secure messaging<br>• Device management",
+        "<b>Raspberry Pi / Grundfos</b><br>• Receives commands<br>• Motor control logic<br>• Relay switching<br>• Status reporting",
+        "<b>Water Pump Motor</b><br>• Physical irrigation<br>• Start/Stop operations<br>• Controlled by relay"
+    ),
+    shape = c("box", "box", "box", "box", "ellipse"),
+    color = c("#E8F4F8", "#FFF4E6", "#F0F8FF", "#E8F5E9", "#FFE6E6"),
+    font.size = 14,
+    level = 1:5  # For hierarchical layout
+)
+
+# Define edges (connections) with labels
+edges <- data.frame(
+    from = c(1, 2, 3, 4),
+    to = c(2, 3, 4, 5),
+    label = c(
+        "Weather Data",
+        "Control Command",
+        "Secure Message",
+        "Relay ON/OFF"
+    ),
+    arrows = "to",
+    smooth = list(enabled = TRUE, type = "curvedCW"),
+    color = "#666666",
+    font.size = 12,
+    font.align = "top"
+)
+
+# Create the interactive network
+visNetwork(nodes, edges, width = "100%", height = "600px") %>%
+    visNodes(
+        shadow = list(enabled = TRUE, size = 10),
+        borderWidth = 2,
+        borderWidthSelected = 3
+    ) %>%
+    visEdges(
+        shadow = TRUE,
+        width = 2
+    ) %>%
+    visLayout(
+        hierarchical = list(
+            enabled = TRUE,
+            direction = "LR",  # Left to Right
+            sortMethod = "directed",
+            levelSeparation = 200,
+            nodeSpacing = 150
+        )
+    ) %>%
+    visInteraction(
+        dragNodes = TRUE,
+        dragView = TRUE,
+        zoomView = TRUE,
+        hover = TRUE,
+        tooltipDelay = 100
+    ) %>%
+    visOptions(
+        highlightNearest = list(enabled = TRUE, degree = 1, hover = TRUE),
+        nodesIdSelection = TRUE
+    ) %>%
+    visPhysics(
+        enabled = FALSE  # Disable physics for stable layout
+    )
