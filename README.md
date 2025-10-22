@@ -1,0 +1,1 @@
+This GitHub account was established primarily for educational purposes, intending to serve as a resource for both research and employment-related endeavors. A core objective is to showcase that technology of this caliber was available and utilized during my generation. Ultimately, this serves to demonstrate the technological capabilities and advancements achieved in my time.
