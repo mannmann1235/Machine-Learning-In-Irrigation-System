@@ -1,0 +1,502 @@
+# ===============================================================
+# Tomato Irrigation Intelligence System - Shiny Report
+# ===============================================================
+
+library(shiny)
+library(dplyr)
+library(ranger)
+library(caret)
+library(janitor)
+library(ggplot2)
+library(plotly)
+
+# ===============================================================
+# UI
+# ===============================================================
+ui <- fluidPage(
+    theme = bslib::bs_theme(bootswatch = "flatly"),
+    
+    titlePanel(
+        div(
+            h2("🍅 Smart Tomato Irrigation System", style = "color: #e74c3c; font-weight: bold;"),
+            h4("Machine Learning-Powered Water Conservation", style = "color: #7f8c8d;")
+        )
+    ),
+    
+    sidebarLayout(
+        sidebarPanel(
+            width = 3,
+            h4("📊 Model Configuration"),
+            hr(),
+            fileInput("csv_file", "Upload Tomato Dataset (CSV):",
+                      accept = c(".csv")),
+            selectInput("location_filter", "Filter by Location:",
+                        choices = c("All Locations"),
+                        selected = "All Locations"),
+            selectInput("season_filter", "Filter by Season:",
+                        choices = c("All Seasons", "Spring", "Summer", "Fall", "Winter"),
+                        selected = "All Seasons"),
+            hr(),
+            actionButton("run_model", "🚀 Run Model Analysis", 
+                         class = "btn-success btn-lg", 
+                         style = "width: 100%;"),
+            br(), br(),
+            div(
+                style = "background: #ecf0f1; padding: 15px; border-radius: 8px;",
+                h5("💧 Why This Matters", style = "color: #2c3e50;"),
+                p("Every accurate prediction saves water and protects crops. 
+          Our ML model helps farmers make smart irrigation decisions 
+          by analyzing weather, soil, and rainfall patterns.", 
+                  style = "font-size: 13px;")
+            )
+        ),
+        
+        mainPanel(
+            width = 9,
+            
+            tabsetPanel(
+                # Tab 1: Model Performance
+                tabPanel(
+                    "📈 Model Performance",
+                    br(),
+                    fluidRow(
+                        column(4, uiOutput("accuracy_box")),
+                        column(4, uiOutput("water_saved_box")),
+                        column(4, uiOutput("smart_decisions_box"))
+                    ),
+                    br(),
+                    fluidRow(
+                        column(6, 
+                               h4("Confusion Matrix", style = "color: #34495e;"),
+                               plotlyOutput("confusion_plot", height = "350px")
+                        ),
+                        column(6,
+                               h4("Prediction Distribution", style = "color: #34495e;"),
+                               plotlyOutput("prediction_dist", height = "350px")
+                        )
+                    ),
+                    br(),
+                    h4("📋 Detailed Metrics", style = "color: #34495e;"),
+                    verbatimTextOutput("metrics_detail")
+                ),
+                
+                # Tab 2: Sample Predictions
+                tabPanel(
+                    "🔍 Sample Predictions",
+                    br(),
+                    h4("Real-time Irrigation Decisions", style = "color: #34495e;"),
+                    p("See how the model analyzes conditions to make smart irrigation choices"),
+                    br(),
+                    DT::dataTableOutput("predictions_table")
+                ),
+                
+                # Tab 3: Insights
+                tabPanel(
+                    "💡 Insights & Impact",
+                    br(),
+                    fluidRow(
+                        column(6,
+                               div(
+                                   style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                              padding: 20px; border-radius: 10px; color: white;",
+                                   h3("🎯 Key Findings"),
+                                   uiOutput("insights_text")
+                               )
+                        ),
+                        column(6,
+                               div(
+                                   style = "background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); 
+                              padding: 20px; border-radius: 10px; color: white;",
+                                   h3("🌱 Agricultural Impact"),
+                                   uiOutput("impact_text")
+                               )
+                        )
+                    ),
+                    br(),
+                    fluidRow(
+                        column(12,
+                               div(
+                                   style = "background: #e8f5e9; padding: 20px; border-radius: 10px;",
+                                   h4("🔬 Technical Excellence", style = "color: #2e7d32;"),
+                                   uiOutput("technical_notes")
+                               )
+                        )
+                    ),
+                    br(),
+                    fluidRow(
+                        column(12,
+                               h4("🌍 Location & Season Analysis", style = "color: #34495e;"),
+                               plotlyOutput("location_season_plot", height = "400px")
+                        )
+                    )
+                )
+            )
+        )
+    )
+)
+
+# ===============================================================
+# Server
+# ===============================================================
+server <- function(input, output, session) {
+    
+    # Reactive values
+    model_results <- reactiveVal(NULL)
+    tomato_data <- reactiveVal(NULL)
+    
+    # Load CSV file
+    observeEvent(input$csv_file, {
+        req(input$csv_file)
+        
+        tryCatch({
+            data <- read.csv(input$csv_file$datapath, stringsAsFactors = FALSE)
+            tomato_data(data)
+            
+            # Update location filter choices
+            locations <- unique(data$Location)
+            updateSelectInput(session, "location_filter",
+                              choices = c("All Locations", locations))
+            
+            showNotification("✅ Dataset loaded successfully!", type = "message")
+        }, error = function(e) {
+            showNotification(paste("❌ Error loading file:", e$message), type = "error")
+        })
+    })
+    
+    # Run model analysis
+    observeEvent(input$run_model, {
+        req(tomato_data())
+        
+        withProgress(message = 'Training ML Model...', value = 0, {
+            
+            incProgress(0.2, detail = "Preparing data...")
+            
+            # Clean and prepare data
+            Tomato <- tomato_data() %>% clean_names()
+            
+            # Rename columns
+            Tomato <- Tomato %>%
+                rename(
+                    temp = temp_c,
+                    humidity = humidity,
+                    rain_chance = rain_forecast_24h_chance,
+                    soil = soil_moisture_sensor,
+                    irrigation_label = irrigation_decision_label,
+                    data_type = data_type,
+                    location = location,
+                    season = season
+                )
+            
+            # Convert irrigation labels
+            Tomato <- Tomato %>%
+                mutate(
+                    irrigation_label = case_when(
+                        grepl("IRRIGATE", irrigation_label, ignore.case = TRUE) & 
+                            !grepl("NO_IRRIGATE", irrigation_label, ignore.case = TRUE) ~ "irrigate",
+                        TRUE ~ "do_not_irrigate"
+                    ),
+                    irrigation_label = as.factor(irrigation_label),
+                    location = as.factor(location),
+                    season = as.factor(season)
+                )
+            
+            incProgress(0.3, detail = "Splitting data...")
+            
+            # Split data
+            train_data <- Tomato %>% filter(tolower(data_type) == "training")
+            test_data  <- Tomato %>% filter(grepl("testing", tolower(data_type)))
+            
+            # Apply filters
+            if (input$location_filter != "All Locations") {
+                test_data <- test_data %>% filter(location == input$location_filter)
+            }
+            
+            if (input$season_filter != "All Seasons") {
+                test_data <- test_data %>% filter(season == input$season_filter)
+            }
+            
+            if (nrow(test_data) == 0) {
+                showNotification("⚠️ No test data matches the selected filters!", type = "warning")
+                return()
+            }
+            
+            incProgress(0.5, detail = "Training Random Forest...")
+            
+            # Train model
+            set.seed(42)
+            rf_model <- ranger(
+                formula = irrigation_label ~ temp + humidity + rain_chance + soil + location + season,
+                data = train_data,
+                num.trees = 500,
+                importance = "none"
+            )
+            
+            incProgress(0.7, detail = "Making predictions...")
+            
+            # Predict
+            test_data$ml_prediction <- predict(rf_model, data = test_data)$predictions
+            
+            # Evaluate
+            test_data <- test_data %>%
+                mutate(
+                    actual_binary = factor(ifelse(irrigation_label == "irrigate", "ON", "OFF")),
+                    predicted_binary = factor(ifelse(ml_prediction == "irrigate", "ON", "OFF"))
+                )
+            
+            test_data$actual_binary <- relevel(test_data$actual_binary, ref = "ON")
+            test_data$predicted_binary <- relevel(test_data$predicted_binary, ref = "ON")
+            
+            cm <- confusionMatrix(test_data$predicted_binary, test_data$actual_binary, positive = "ON")
+            
+            incProgress(1, detail = "Complete!")
+            
+            # Store results
+            model_results(list(
+                confusion_matrix = cm,
+                test_data = test_data,
+                train_size = nrow(train_data),
+                test_size = nrow(test_data),
+                all_data = Tomato
+            ))
+            
+            showNotification("✅ Model trained and evaluated successfully!", type = "message")
+        })
+    })
+    
+    # Output: Accuracy Box
+    output$accuracy_box <- renderUI({
+        req(model_results())
+        cm <- model_results()$confusion_matrix
+        acc <- round(cm$overall['Accuracy'] * 100, 1)
+        
+        div(
+            style = "background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); 
+               padding: 20px; border-radius: 10px; text-align: center; color: white;",
+            h2(paste0(acc, "%"), style = "margin: 0; font-size: 48px; font-weight: bold;"),
+            h5("Model Accuracy", style = "margin-top: 10px;")
+        )
+    })
+    
+    # Output: Water Saved Box
+    output$water_saved_box <- renderUI({
+        req(model_results())
+        cm <- model_results()$confusion_matrix
+        tn <- cm$table['OFF', 'OFF']
+        
+        div(
+            style = "background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); 
+               padding: 20px; border-radius: 10px; text-align: center; color: white;",
+            h2(tn, style = "margin: 0; font-size: 48px; font-weight: bold;"),
+            h5("Water-Saving Decisions (TN)", style = "margin-top: 10px;")
+        )
+    })
+    
+    # Output: Smart Decisions Box
+    output$smart_decisions_box <- renderUI({
+        req(model_results())
+        cm <- model_results()$confusion_matrix
+        tp <- cm$table['ON', 'ON']
+        
+        div(
+            style = "background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); 
+               padding: 20px; border-radius: 10px; text-align: center; color: white;",
+            h2(tp, style = "margin: 0; font-size: 48px; font-weight: bold;"),
+            h5("Correct Irrigations (TP)", style = "margin-top: 10px;")
+        )
+    })
+    
+    # Output: Confusion Matrix Plot
+    output$confusion_plot <- renderPlotly({
+        req(model_results())
+        cm <- model_results()$confusion_matrix
+        
+        cm_df <- as.data.frame(cm$table)
+        colnames(cm_df) <- c("Predicted", "Actual", "Count")
+        
+        p <- ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Count)) +
+            geom_tile(color = "white", size = 2) +
+            geom_text(aes(label = Count), size = 12, fontface = "bold", color = "white") +
+            scale_fill_gradient(low = "#3498db", high = "#e74c3c") +
+            theme_minimal(base_size = 14) +
+            theme(legend.position = "none",
+                  panel.grid = element_blank()) +
+            labs(x = "Actual Decision", y = "Predicted Decision")
+        
+        ggplotly(p, tooltip = c("x", "y", "fill"))
+    })
+    
+    # Output: Prediction Distribution
+    output$prediction_dist <- renderPlotly({
+        req(model_results())
+        test_data <- model_results()$test_data
+        
+        pred_summary <- test_data %>%
+            count(predicted_binary) %>%
+            mutate(percentage = n / sum(n) * 100)
+        
+        p <- ggplot(pred_summary, aes(x = predicted_binary, y = n, fill = predicted_binary)) +
+            geom_col(width = 0.6) +
+            geom_text(aes(label = paste0(n, "\n(", round(percentage, 1), "%)")), 
+                      vjust = -0.5, fontface = "bold", size = 5) +
+            scale_fill_manual(values = c("ON" = "#27ae60", "OFF" = "#e67e22")) +
+            theme_minimal(base_size = 14) +
+            theme(legend.position = "none") +
+            labs(x = "Motor Decision", y = "Count", title = "")
+        
+        ggplotly(p)
+    })
+    
+    # Output: Detailed Metrics
+    output$metrics_detail <- renderPrint({
+        req(model_results())
+        cm <- model_results()$confusion_matrix
+        
+        cat("═══════════════════════════════════════════════════\n")
+        cat("📊 DETAILED PERFORMANCE METRICS\n")
+        cat("═══════════════════════════════════════════════════\n\n")
+        
+        cat("🎯 Accuracy:", round(cm$overall['Accuracy'] * 100, 2), "%\n")
+        cat("📈 Sensitivity (True Positive Rate):", round(cm$byClass['Sensitivity'] * 100, 2), "%\n")
+        cat("📉 Specificity (True Negative Rate):", round(cm$byClass['Specificity'] * 100, 2), "%\n")
+        cat("⚖️  Balanced Accuracy:", round(cm$byClass['Balanced Accuracy'] * 100, 2), "%\n\n")
+        
+        cat("═══════════════════════════════════════════════════\n")
+        cat("📋 CONFUSION MATRIX BREAKDOWN\n")
+        cat("═══════════════════════════════════════════════════\n\n")
+        
+        cat("✅ True Positives (TP):", cm$table['ON', 'ON'], 
+            "- Motor ON when needed\n")
+        cat("✅ True Negatives (TN):", cm$table['OFF', 'OFF'], 
+            "- Motor OFF, saved water!\n")
+        cat("⚠️  False Positives (FP):", cm$table['ON', 'OFF'], 
+            "- Unnecessary irrigation\n")
+        cat("❌ False Negatives (FN):", cm$table['OFF', 'ON'], 
+            "- Missed irrigation (risk!)\n")
+    })
+    
+    # Output: Predictions Table
+    output$predictions_table <- DT::renderDataTable({
+        req(model_results())
+        test_data <- model_results()$test_data
+        
+        display_data <- test_data %>%
+            select(location, season, temp, humidity, rain_chance, soil, 
+                   actual_binary, predicted_binary) %>%
+            rename(
+                Location = location,
+                Season = season,
+                `Temp (°C)` = temp,
+                `Humidity (%)` = humidity,
+                `Rain Chance (%)` = rain_chance,
+                `Soil Moisture (%)` = soil,
+                `Actual Decision` = actual_binary,
+                `ML Prediction` = predicted_binary
+            ) %>%
+            mutate(
+                `Temp (°C)` = round(`Temp (°C)`, 1),
+                `Humidity (%)` = round(`Humidity (%)`, 1),
+                `Rain Chance (%)` = round(`Rain Chance (%)`, 1),
+                `Soil Moisture (%)` = round(`Soil Moisture (%)`, 1)
+            )
+        
+        DT::datatable(
+            display_data,
+            options = list(
+                pageLength = 10,
+                scrollX = TRUE,
+                columnDefs = list(
+                    list(className = 'dt-center', targets = '_all')
+                )
+            ),
+            rownames = FALSE
+        ) %>%
+            DT::formatStyle(
+                'ML Prediction',
+                backgroundColor = DT::styleEqual(c('ON', 'OFF'), c('#d4edda', '#fff3cd'))
+            )
+    })
+    
+    # Output: Insights Text
+    output$insights_text <- renderUI({
+        req(model_results())
+        cm <- model_results()$confusion_matrix
+        tn <- cm$table['OFF', 'OFF']
+        tp <- cm$table['ON', 'ON']
+        acc <- round(cm$overall['Accuracy'] * 100, 1)
+        
+        HTML(paste0(
+            "<ul style='font-size: 15px; line-height: 1.8;'>",
+            "<li><strong>", acc, "%</strong> overall accuracy in irrigation decisions</li>",
+            "<li><strong>", tn, "</strong> instances where the model correctly prevented unnecessary watering</li>",
+            "<li><strong>", tp, "</strong> times crops received needed irrigation</li>",
+            "<li>Rain forecast integration helps optimize water usage</li>",
+            "</ul>"
+        ))
+    })
+    
+    # Output: Impact Text
+    output$impact_text <- renderUI({
+        req(model_results())
+        cm <- model_results()$confusion_matrix
+        tn <- cm$table['OFF', 'OFF']
+        
+        water_saved <- tn * 50  # Assume 50L per decision
+        
+        HTML(paste0(
+            "<ul style='font-size: 15px; line-height: 1.8;'>",
+            "<li>Estimated <strong>~", format(water_saved, big.mark = ","), " liters</strong> of water conserved</li>",
+            "<li>Reduced energy costs from pump operations</li>",
+            "<li>Healthier crops through optimized moisture levels</li>",
+            "<li>Sustainable farming across Collier & Fresno regions</li>",
+            "</ul>"
+        ))
+    })
+    
+    # Output: Technical Notes
+    output$technical_notes <- renderUI({
+        req(model_results())
+        results <- model_results()
+        
+        locations <- unique(results$all_data$location)
+        seasons <- unique(results$all_data$season)
+        
+        HTML(paste0(
+            "<p style='font-size: 14px; color: #1b5e20; line-height: 1.8;'>",
+            "<strong>🔧 Model:</strong> Random Forest with 500 trees<br>",
+            "<strong>📊 Training Set:</strong> ", results$train_size, " observations<br>",
+            "<strong>🧪 Test Set:</strong> ", results$test_size, " observations<br>",
+            "<strong>📍 Locations:</strong> ", paste(locations, collapse = ", "), "<br>",
+            "<strong>🌱 Seasons:</strong> ", paste(seasons, collapse = ", "), "<br>",
+            "<strong>🌡️ Features:</strong> Temperature, Humidity, Rain Forecast, Soil Moisture, Location, Season<br>",
+            "<strong>💡 Key Innovation:</strong> Rain Forecast Override for water conservation",
+            "</p>"
+        ))
+    })
+    
+    # Output: Location & Season Analysis
+    output$location_season_plot <- renderPlotly({
+        req(model_results())
+        test_data <- model_results()$test_data
+        
+        location_season <- test_data %>%
+            group_by(location, season, predicted_binary) %>%
+            summarise(count = n(), .groups = "drop") %>%
+            mutate(decision = ifelse(predicted_binary == "ON", "Irrigate", "No Irrigate"))
+        
+        p <- ggplot(location_season, aes(x = season, y = count, fill = decision)) +
+            geom_col(position = "stack") +
+            facet_wrap(~location) +
+            scale_fill_manual(values = c("Irrigate" = "#27ae60", "No Irrigate" = "#e67e22")) +
+            theme_minimal(base_size = 13) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = "Season", y = "Number of Decisions", fill = "Decision",
+                 title = "Irrigation Decisions by Location and Season")
+        
+        ggplotly(p)
+    })
+}
+
+# ===============================================================
+# Run App
+# ===============================================================
+shinyApp(ui = ui, server = server)
